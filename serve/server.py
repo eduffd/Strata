@@ -3498,7 +3498,10 @@ class Service:
         self.shared_path = None                       # where they are kept between starts (next to the config)
         self.config_effort = None                     # #1641: the config's "reasoning_effort": the level for requests with none
         self.keep_awake = None                        # #1727 (opt-in): serve.keepawake.KeepAwake, the config's "prevent_sleep"
-        self.fifo = threading.Lock()
+        self.fifo = threading.Lock()                  # the single turn; a TurnBroker only when the burst is on
+        self.burst = None                             # the burst policy (None: off)
+        self.requested_slots = 1                      # main() sets it for the real engine
+        self._image_ids = None                        # the tokenizer's <|image_pad|> and <|vision_start|> ids
         self.slot_save_path = None                    # --slot-save-path: /slots/0?action=save|restore (off when None)
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
@@ -3603,6 +3606,29 @@ class Service:
         if self.max_queue is None:
             return None
         return max(1, int(getattr(self.engine, "batch", 0) or 0)) + self.max_queue
+
+    def enable_burst(self, policy: "burst.BurstPolicy | None") -> None:
+        """Opt in: Service.fifo becomes a TurnBroker.  Called once, before serving; idempotent."""
+        if policy is None or isinstance(self.fifo, burst.TurnBroker):
+            return
+        if self.requested_slots > 1:
+            print("[strata] conversation_burst has no effect with parallel requests; the engine's slots "
+                  "already keep each conversation", flush=True)
+            return
+        self.burst = policy
+        self.fifo = burst.TurnBroker(policy)
+        print(f"[strata] conversation burst: up to {policy.requests} turns of one conversation in a row, "
+              f"waiting {round(policy.grace_s * 1000)} ms for its next turn", flush=True)
+
+    def _image_token_ids(self) -> tuple[int | None, int | None]:
+        """The tokenizer's <|image_pad|> and <|vision_start|> ids, encoded once (None: it has no such token)."""
+        if self._image_ids is None:
+            found = []
+            for text in (IMAGE_PAD, VISION_START):
+                ids = self.tok.encode(text, parse_special=True)
+                found.append(ids[0] if ids else None)
+            self._image_ids = tuple(found)
+        return self._image_ids
 
     def _terminal_event_locked(self, request_id: str, event: str, outcome: str | None = None) -> None:
         """Append one redacted transition while holding status_lock; never include request content."""
@@ -4691,6 +4717,13 @@ class Service:
             if ka is not None:
                 ka.release()
 
+    def _give_up(self, ticket) -> None:
+        """Give the turn back without serving it: abandon an owned ticket or withdraw a waiting one."""
+        if ticket is not None:
+            self.fifo.leave(ticket)          # idempotent; the finally may call it once more
+        else:
+            self.fifo.release()              # the off path
+
     def _run(self, ids, thinking, tools, max_new, sampling, cancel, force=None) -> Iterator[tuple[str, object]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..}).
         `force` (forced_call): the opening of the call the reply must make - see prepare()."""
@@ -4800,28 +4833,42 @@ class Service:
         try:
             # --batch: the engine runs several requests at once (StrataEngine.generate_batched orders them)
             turn = contextlib.ExitStack()
+            ticket, held = None, False
             if not par:
+                if self.burst is not None:
+                    pad, start = self._image_token_ids()
+                    lane = burst.Lane(prompt=tuple(ids),
+                                      images=burst.image_marks(ids, (sampling or {}).get("strata_img_keys") or (),
+                                                               pad, start),
+                                      leaves_checkpoint=(sampling or {}).get("strata_checkpoint") is not False)
+                    ticket = self.fifo.join(lane)
                 # #1619: a request waiting for the single turn sends a keep-alive every QUEUE_BEAT_S, so a client with
                 # a stream idle timeout does not abort a healthy queued request (and its retry read the prompt again);
                 # a client that left while queued gives its place up instead of taking the turn only to cancel there
                 got = False
-                while not got:
-                    if cancel.is_set():
-                        raise QueueCancelled("the client disconnected while waiting for the engine")
-                    left = deadline - time.monotonic() if deadline is not None else QUEUE_BEAT_S
-                    if left <= 0:
-                        raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
-                    got = self.fifo.acquire(timeout=min(QUEUE_BEAT_S, left))
-                    if got:
+                try:
+                    while not got:
                         if cancel.is_set():
-                            self.fifo.release()
                             raise QueueCancelled("the client disconnected while waiting for the engine")
-                        if deadline is not None and time.monotonic() >= deadline:
-                            self.fifo.release()
+                        left = deadline - time.monotonic() if deadline is not None else QUEUE_BEAT_S
+                        if left <= 0:
                             raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
-                        turn.callback(self.fifo.release)
-                    else:
-                        yield "ping", None
+                        got = self.fifo.wait(ticket, min(QUEUE_BEAT_S, left)) if ticket is not None \
+                            else self.fifo.acquire(timeout=min(QUEUE_BEAT_S, left))
+                        if got:
+                            if cancel.is_set():
+                                self._give_up(ticket)
+                                raise QueueCancelled("the client disconnected while waiting for the engine")
+                            if deadline is not None and time.monotonic() >= deadline:
+                                self._give_up(ticket)
+                                raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
+                            turn.callback(self.fifo.release)
+                            held = True
+                        else:
+                            yield "ping", None
+                finally:
+                    if ticket is not None and not held:
+                        self.fifo.leave(ticket)
             with turn:
                 try:
                     with self.status_lock:
@@ -7741,6 +7788,12 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                     help="maximum inference calls waiting beyond effective engine slots; 0 refuses overload")
     ap.add_argument("--queue-timeout", type=float, default=None,
                     help="maximum seconds waiting for the first engine turn (0.1..600; off by default)")
+    ap.add_argument("--conversation-burst", type=int, default=None, metavar="N",
+                    help="serve up to N turns of one conversation before another conversation's waiting "
+                         "request (opt-in; 0 = off; needs one request at a time)")
+    ap.add_argument("--conversation-grace-ms", type=int, default=None, metavar="MS",
+                    help="how long to wait for the next turn of the same conversation before another one "
+                         "gets the turn (default 100; 0 = no wait)")
     ap.add_argument("--batch-telemetry", action=argparse.BooleanOptionalAction, default=None,
                     help="opt in to low-rate engine decode-window samples for /v1/telemetry")
     ap.add_argument("--offline", action="store_true",
@@ -7841,6 +7894,14 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         ap.error("--queue-timeout / queue_timeout must be finite seconds in 0.1..600")
     if queue_timeout is not None and max_queue is None:
         ap.error("--queue-timeout requires --max-queue / max_queue to bound pending calls")
+    burst_value = a.conversation_burst if a.conversation_burst is not None else cfg.get("conversation_burst")
+    grace_value = a.conversation_grace_ms if a.conversation_grace_ms is not None else cfg.get("conversation_grace_ms")
+    try:
+        burst_choice = burst.read_burst(burst_value, grace_value)
+    except ValueError as e:
+        ap.error(str(e))
+    for note in burst_choice.notes:
+        print(f"[strata] {note}", flush=True)
     if a.parallel is not None:
         if a.parallel < 1 or a.parallel > 1024:
             ap.error("--parallel must be in 1..1024; the engine may reduce it to the supported count")
@@ -8012,6 +8073,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                         pass
         per_replica = requested if isinstance(requested, int) and not isinstance(requested, bool) and requested > 0 else 1
         svc.requested_slots = per_replica * len(groups) if groups else per_replica
+    svc.enable_burst(burst_choice.policy)               # after the slot count: the burst needs one turn at a time
     svc.answer_room = cfg.get("answer_room") is not False
     svc.reasoning_close_retry = cfg.get("reasoning_close_retry") is True    # #1053: opt-in, off by default
     if cfg.get("images"):                               # image generation (serve/images.py), set up by setup --images
