@@ -443,6 +443,27 @@ class OperatorProfileTests(unittest.TestCase):
             from strata_cli.cli import _launch_plan
             _launch_plan("local")
 
+    def test_conversation_burst_overrides_reach_the_serve_plan(self):
+        profiles.create("local", str(self.config))
+        profiles.set_values("local", ["conversation_burst=4", "conversation_grace_ms=50"])
+        with mock.patch("serve.server.main", side_effect=AssertionError("server started")):
+            code, planned = self.command("serve", "--profile", "local", "--plan", "--output", "json")
+        self.assertEqual(code, 0)
+        plan = planned["plan"]
+        self.assertEqual((plan["effective"]["conversation_burst"], plan["effective"]["conversation_grace_ms"]), (4, 50))
+        self.assertEqual((plan["origin"]["conversation_burst"], plan["origin"]["conversation_grace_ms"]),
+                         ("saved_profile", "saved_profile"))
+        argv = plan["server_argv"]
+        self.assertEqual(argv[argv.index("--conversation-burst") + 1], "4")
+        self.assertEqual(argv[argv.index("--conversation-grace-ms") + 1], "50")
+
+    def test_burst_overrides_refuse_strings_and_negatives(self):
+        profiles.create("local", str(self.config))
+        for assignment in ("conversation_burst=four", "conversation_burst=-1",
+                           "conversation_grace_ms=slow", "conversation_grace_ms=-1"):
+            with self.assertRaises(profiles.ProfileError):
+                profiles.set_values("local", [assignment])
+
 
 if __name__ == "__main__":
     unittest.main()

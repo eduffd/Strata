@@ -95,6 +95,12 @@ def add_parsers(sp: argparse._SubParsersAction) -> list[argparse.ArgumentParser]
                         "'on' picks the reader by your graphics memory: the CPU reader under 24 GB, the GPU reader from 24 GB (any make); "
                         "gpu / cpu choose one; off turns pictures off")
     g.add_argument("--parallel", type=_parallel, metavar="N", help="requests answered at the same time, 1 to 8 (default: fit to your graphics card)")
+    g.add_argument("--conversation-burst", type=int, metavar="N",
+                   help="serve up to N turns of one conversation in a row before another conversation's waiting request "
+                        "(opt-in; 0 = off; needs one request at a time)")
+    g.add_argument("--conversation-grace-ms", type=int, metavar="MS",
+                   help="how long to wait for the next turn of the same conversation before another one gets the turn "
+                        "(default 100; 0 = no wait)")
     g.add_argument("--mtp", type=_choice("a draft layer setting", S.MTP_MODES), metavar="on|off",
                    help="the draft layer that makes answers faster. off starts without it: about 1 GB less graphics memory and less RAM, "
                         "slower answers; use it when the engine stops at start on a small card or a PC with little RAM. Default: on")
@@ -207,6 +213,10 @@ def settings_from_args(a: argparse.Namespace, catalog=None) -> tuple[S.LaunchSet
         s.vision = a.vision
     if a.parallel:
         s.parallel = a.parallel
+    if a.conversation_burst is not None:
+        s.burst = a.conversation_burst
+    if a.conversation_grace_ms is not None:
+        s.grace_ms = a.conversation_grace_ms
     if a.mtp:
         s.mtp = a.mtp
     if a.gpu:
@@ -281,6 +291,7 @@ def apply_defaults(s: S.LaunchSettings, catalog) -> tuple[S.LaunchSettings, list
     notices += S.check_access(s)
     vram = comp.main_vram_gb or None
     notices += S.check_parallel(s, vram_gb=vram)
+    notices += S.check_burst(s, parallel=s.parallel or S.fit_parallel(vram))
     return s, notices
 
 
@@ -547,7 +558,8 @@ def run_launch(a: argparse.Namespace) -> int:
             if a.model or a.model_path:
                 return fail(str(e), 5)
         s, notices = settings_from_args(a, catalog)
-        have_choices = bool(a.preset or a.model or a.model_path or a.context or a.vision or a.parallel or a.access or a.tune)
+        have_choices = bool(a.preset or a.model or a.model_path or a.context or a.vision or a.parallel or a.access or a.tune
+                            or a.conversation_burst is not None or a.conversation_grace_ms is not None)
         interactive = sys.stdin.isatty() and sys.stdout.isatty() and not a.no_tui and not machine and not a.plan
         plain_questions = False
         if not have_choices and not interactive and not a.plan:

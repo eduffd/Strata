@@ -262,6 +262,10 @@ def derive_config(base: dict, s: S.LaunchSettings, *, bool_flags: frozenset[str]
         draft_layer.apply(cfg)
     elif s.mtp == "on":
         cfg["mtp"] = True
+    if s.burst is not None:
+        cfg["conversation_burst"] = int(s.burst)
+    if s.grace_ms is not None:
+        cfg["conversation_grace_ms"] = int(s.grace_ms)
     if s.extra:
         a_changes, e_changes = S.as_argv_changes(s.extra, bool_flags)
         cfg["args"] = tune_knobs.apply_to_argv([str(x) for x in cfg.get("args") or []], a_changes)

@@ -24,7 +24,7 @@ from pathlib import Path
 
 PROFILE_ID = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 OVERRIDE_KEYS = frozenset({"host", "port", "parallel", "batch_groups", "max_queue", "queue_timeout", "offline",
-                           "batch_telemetry"})
+                           "batch_telemetry", "conversation_burst", "conversation_grace_ms"})
 
 
 class ProfileError(ValueError):
@@ -67,7 +67,7 @@ def parse_assignment(text: str) -> tuple[str, object]:
     key, sep, raw = text.partition("=")
     if not sep or key not in OVERRIDE_KEYS:
         raise ProfileError(f"expected one of {', '.join(sorted(OVERRIDE_KEYS))} as KEY=VALUE")
-    if key in ("port", "parallel", "max_queue"):
+    if key in ("port", "parallel", "max_queue", "conversation_burst", "conversation_grace_ms"):
         try:
             value: object = int(raw)
         except ValueError:
@@ -98,6 +98,7 @@ def parse_assignment(text: str) -> tuple[str, object]:
 def validate_overrides(overrides: object) -> dict:
     if not isinstance(overrides, dict) or set(overrides) - OVERRIDE_KEYS:
         raise ProfileError("overrides must contain only supported serving settings")
+    from serve.burst import read_burst
     for key, value in overrides.items():
         if key == "host" and (not isinstance(value, str) or not value or any(c.isspace() for c in value)):
             raise ProfileError("host must be a nonempty address without whitespace")
@@ -114,6 +115,12 @@ def validate_overrides(overrides: object) -> dict:
             raise ProfileError("batch_groups must be auto or in 1..1024")
         if key in ("offline", "batch_telemetry") and type(value) is not bool:
             raise ProfileError(f"{key} must be true or false")
+        if key in ("conversation_burst", "conversation_grace_ms"):
+            burst, grace = (value, None) if key == "conversation_burst" else (None, value)
+            try:
+                read_burst(burst, grace)
+            except ValueError as e:
+                raise ProfileError(str(e)) from None
     return overrides
 
 
