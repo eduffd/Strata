@@ -54,6 +54,12 @@ def parser() -> argparse.ArgumentParser:
     serve.add_argument("--batch-groups", help="requested pipeline groups (auto or positive integer)")
     serve.add_argument("--max-queue", type=int, help="maximum pending inference calls beyond effective slots")
     serve.add_argument("--queue-timeout", type=float, help="seconds to wait for the first engine turn (0.1..600)")
+    serve.add_argument("--conversation-burst", type=int, metavar="N",
+                       help="serve up to N turns of one conversation before another conversation's waiting request "
+                            "(opt-in; 0 = off; needs one request at a time)")
+    serve.add_argument("--conversation-grace-ms", type=int, metavar="MS",
+                       help="how long to wait for the next turn of the same conversation before another one gets "
+                            "the turn (default 100; 0 = no wait)")
     serve.add_argument("--batch-telemetry", action=argparse.BooleanOptionalAction, default=None,
                        help="sample actual engine decode-window rows for the monitor (opt-in)")
     serve.add_argument("--offline", action="store_true", help="disable remote image fetches and MCP/tool subprocesses")
@@ -746,6 +752,7 @@ def _effective(cfg: dict, saved: dict | None, cli: argparse.Namespace | None = N
     origins = {}
     for key, default in (("host", "127.0.0.1"), ("port", 8095), ("parallel", None),
                          ("batch_groups", None), ("max_queue", None), ("queue_timeout", None),
+                         ("conversation_burst", None), ("conversation_grace_ms", None),
                          ("offline", False), ("batch_telemetry", False)):
         explicit = getattr(cli, key, None) if cli is not None else None
         if key == "offline" and explicit is False:
@@ -763,7 +770,7 @@ def _effective(cfg: dict, saved: dict | None, cli: argparse.Namespace | None = N
         values[key], origins[key] = value, origin
     profiles.validate_overrides({key: value for key, value in values.items() if key in
                                   ("host", "port", "parallel", "batch_groups", "max_queue", "queue_timeout",
-                                   "offline", "batch_telemetry")
+                                   "conversation_burst", "conversation_grace_ms", "offline", "batch_telemetry")
                                   and value is not None})
     if values["queue_timeout"] is not None and values["max_queue"] is None:
         raise ProfileError("queue_timeout requires max_queue to bound pending calls")
@@ -794,9 +801,13 @@ def _launch_plan(ref: str, cli: argparse.Namespace | None = None) -> tuple[dict,
     if cli is not None:
         server_args += ["--shutdown-timeout", str(cli.shutdown_timeout)]
     for key, flag in (("parallel", "--parallel"), ("batch_groups", "--batch-groups"),
-                      ("max_queue", "--max-queue"), ("queue_timeout", "--queue-timeout")):
+                      ("max_queue", "--max-queue"), ("queue_timeout", "--queue-timeout"),
+                      ("conversation_burst", "--conversation-burst"),
+                      ("conversation_grace_ms", "--conversation-grace-ms")):
         if values[key] is not None and origins[key] != "run_config":
             server_args += [flag, str(values[key])]
+    from serve.burst import read_burst
+    burst_notes = list(read_burst(values["conversation_burst"], values["conversation_grace_ms"]).notes)
     if values["offline"]:
         server_args.append("--offline")
     if origins["batch_telemetry"] not in ("run_config", "default"):
@@ -820,7 +831,7 @@ def _launch_plan(ref: str, cli: argparse.Namespace | None = None) -> tuple[dict,
             "effective": values, "origin": origins, "server_argv": server_args,
             "ready_file": ready_path,
             "engine_exe": cfg["exe"], "engine_argv": _redact_argv(engine_argv),
-            "notes": [line for line in notes.getvalue().splitlines() if line]}
+            "notes": [line for line in notes.getvalue().splitlines() if line] + burst_notes}
     return plan, server_args
 
 

@@ -70,6 +70,8 @@ class Ctx:
         s = self.settings
         out = [n.line() for n in S.check_access(s)]
         out += [n.line() for n in S.check_parallel(s, vram_gb=self.computer.main_vram_gb or None)]
+        out += [n.line() for n in S.check_burst(
+            s, parallel=s.parallel or S.fit_parallel(self.computer.main_vram_gb or None))]
         out += [n.line() for n in S.check_context(s)]
         r = next((x for x in self.rows if (x.family, x.model) == (s.family, s.model)), None)
         if r is not None and r.verdict != "fits":

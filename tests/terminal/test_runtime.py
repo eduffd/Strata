@@ -859,6 +859,23 @@ class RuntimeTests(unittest.TestCase):
                 plan, args = _launch_plan("local")
             self.assertEqual(plan["effective"]["host"], "0.0.0.0")
 
+    def test_conversation_burst_plan_forwards_and_refuses(self):
+        from argparse import Namespace
+        from strata_cli.cli import _launch_plan
+        cli = Namespace(conversation_burst=4, conversation_grace_ms=50, shutdown_timeout=30, ready_file=None)
+        plan, args = _launch_plan("local", cli)
+        self.assertEqual((plan["effective"]["conversation_burst"], plan["effective"]["conversation_grace_ms"]), (4, 50))
+        self.assertEqual((plan["origin"]["conversation_burst"], plan["origin"]["conversation_grace_ms"]),
+                         ("command", "command"))
+        self.assertEqual(args[args.index("--conversation-burst") + 1], "4")
+        self.assertEqual(args[args.index("--conversation-grace-ms") + 1], "50")
+        with self.assertRaises(ValueError):
+            _launch_plan("local", Namespace(conversation_burst=-1, conversation_grace_ms=None,
+                                            shutdown_timeout=30, ready_file=None))
+        lonely, _ = _launch_plan("local", Namespace(conversation_burst=None, conversation_grace_ms=50,
+                                                    shutdown_timeout=30, ready_file=None))
+        self.assertTrue(any("has no effect without conversation_burst" in note for note in lonely["notes"]))
+
     def test_lazy_model_is_verified_as_unloaded_without_generation(self):
         cfg = json.loads(self.config.read_text())
         cfg["lazy_load"] = True

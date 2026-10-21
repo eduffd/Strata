@@ -43,6 +43,19 @@ class SettingsRules(unittest.TestCase):
         self.assertEqual(S.check_parallel(S.LaunchSettings(parallel=9), vram_gb=12)[0].level, "error")
         self.assertEqual(S.check_parallel(S.LaunchSettings(parallel=2), vram_gb=24), [])
 
+    def test_burst_checks_are_warnings_but_a_bad_value_is_an_error(self):
+        self.assertEqual(S.check_burst(S.LaunchSettings(), parallel=1), [])
+        self.assertEqual(S.check_burst(S.LaunchSettings(burst=4), parallel=1), [])
+        busy = S.check_burst(S.LaunchSettings(burst=4), parallel=4)
+        self.assertEqual([n.level for n in busy], ["warn"])
+        self.assertIn("no effect with 4 requests", busy[0].line())
+        bad = S.check_burst(S.LaunchSettings(burst=-1), parallel=1)
+        self.assertEqual(bad[0].level, "error")
+        self.assertIn("conversation_burst", bad[0].line())
+        lonely = S.check_burst(S.LaunchSettings(grace_ms=50), parallel=1)
+        self.assertEqual([n.level for n in lonely], ["warn"])
+        self.assertIn("has no effect without conversation_burst", lonely[0].line())
+
     def test_no_key_warnings_are_plain_and_stronger_in_public(self):
         lan = S.check_access(S.LaunchSettings(access="lan", no_key=True))
         self.assertEqual([n.level for n in lan], ["warn"])
@@ -86,6 +99,13 @@ class SettingsRules(unittest.TestCase):
                      "--set prefill=65536", "--set STRATA_PIN_BY_NEED=1"):
             self.assertIn(part, text)
         self.assertIn('--preset "Fast"', S.flags_text(s, preset="Fast"))
+
+    def test_flags_text_carries_the_burst(self):
+        s = S.LaunchSettings(family="qwen", model="IQ3_XXS", burst=4, grace_ms=50)
+        text = S.flags_text(s)
+        self.assertIn("--conversation-burst 4", text)
+        self.assertIn("--conversation-grace-ms 50", text)
+        self.assertNotIn("--conversation-burst", S.flags_text(S.LaunchSettings()))
 
     def test_slug(self):
         self.assertEqual(S.slug("IQ3_XXS 128K - Full speed"), "iq3_xxs-128k-full-speed")
@@ -312,6 +332,13 @@ class RunConfig(unittest.TestCase):
         self.assertEqual(cfg["api_key"], "sk-x")
         cfg = derive_config(self.BASE, S.LaunchSettings(access="local", no_key=True), bool_flags=frozenset())
         self.assertNotIn("api_key", cfg)
+
+    def test_derive_writes_the_burst_keys_only_when_chosen(self):
+        cfg = derive_config(self.BASE, S.LaunchSettings(burst=4, grace_ms=50), bool_flags=frozenset())
+        self.assertEqual((cfg["conversation_burst"], cfg["conversation_grace_ms"]), (4, 50))
+        off = derive_config(self.BASE, S.LaunchSettings(), bool_flags=frozenset())
+        self.assertNotIn("conversation_burst", off)
+        self.assertNotIn("conversation_grace_ms", off)
 
     def test_installed_config_matching(self):
         d = {"context": 32768, "kv": "int8", "images": "off"}
@@ -762,6 +789,18 @@ class FlagsCommand(unittest.TestCase):
         self.assertIn("--mtp off", p["flags"])
         code, out, err = run_cli(["launch", "--plan", "--mtp", "maybe"])
         self.assertNotEqual(code, 0)
+
+    def test_conversation_burst_flags_are_listed_planned_and_copyable(self):
+        code, out, err = run_cli(["launch", "--help"])
+        self.assertIn("--conversation-burst", out)
+        self.assertIn("--conversation-grace-ms", out)
+        p = self.plan("--model", "q2_0", "--conversation-burst", "4", "--conversation-grace-ms", "50")
+        self.assertEqual((p["settings"]["burst"], p["settings"]["grace_ms"]), (4, 50))
+        self.assertIn("--conversation-burst 4", p["flags"])
+        self.assertIn("--conversation-grace-ms 50", p["flags"])
+        code, out, err = run_cli(["launch", "--plan", "--conversation-burst", "-1"])
+        self.assertEqual(code, 2)
+        self.assertIn("conversation_burst", err)
 
     def test_vision_help_says_the_picture_rule(self):
         code, out, err = run_cli(["launch", "--help"])

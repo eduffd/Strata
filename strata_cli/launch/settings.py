@@ -87,6 +87,8 @@ class LaunchSettings:
     kv: str | None = None                      # None = int8 above 8K, as setup
     vision: str | None = None                  # None = the default (on when the model can read pictures and the engine has the reader), off | on | gpu | cpu
     parallel: int | None = None                # None = fit to the card
+    burst: int | None = None                   # None = off: serve up to this many turns of one conversation in a row
+    grace_ms: int | None = None                # None = the server's default wait for the conversation's next turn
     mtp: str | None = None                     # None = as installed (draft layer on); "off" starts without it (less graphics memory and RAM, slower); "on" overrides an installed "off"
     tune: str = "skip"                         # quick | thorough | skip
     tune_allow_small: bool = False             # the "answer-changing" tick, off by default, as in the app
@@ -203,6 +205,24 @@ def check_parallel(s: LaunchSettings, *, vram_gb: float | None, fitted: int | No
     return out
 
 
+def check_burst(s: LaunchSettings, *, parallel: int | None = None) -> list[Notice]:
+    """The conversation burst's two values, and the note that parallel requests already keep each conversation.
+
+    `parallel` is the number of requests that will run at once (the explicit choice, else what fits the card)."""
+    if s.burst is None and s.grace_ms is None:
+        return []
+    from serve.burst import read_burst
+    try:
+        choice = read_burst(s.burst, s.grace_ms)
+    except ValueError as e:
+        return [Notice("error", str(e), "Use a whole number: burst 2 or more (0 turns it off), grace 0 to 5000 ms.")]
+    out = [Notice("warn", note, "") for note in choice.notes]
+    if choice.policy is not None and parallel is not None and parallel > 1:
+        out.append(Notice("warn", f"The conversation burst has no effect with {parallel} requests at once: each engine "
+                                  "slot already keeps its own conversation.", ""))
+    return out
+
+
 def check_context(s: LaunchSettings, *, max_fit_tokens: int | None = None) -> list[Notice]:
     out: list[Notice] = []
     if s.context is not None and s.context > 262144:
@@ -285,6 +305,10 @@ def flags_text(s: LaunchSettings, *, preset: str | None = None) -> str:
             parts.append(f"--vision {s.vision}")
         if s.parallel:
             parts.append(f"--parallel {s.parallel}")
+        if s.burst is not None:
+            parts.append(f"--conversation-burst {s.burst}")
+        if s.grace_ms is not None:
+            parts.append(f"--conversation-grace-ms {s.grace_ms}")
         if s.mtp:
             parts.append(f"--mtp {s.mtp}")
         parts.append(f"--tune {s.tune}")
