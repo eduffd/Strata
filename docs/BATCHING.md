@@ -9,6 +9,8 @@ conversations at the same time instead of waiting for each other.
 
 It is opt-in and changes nothing when the options are absent (#465; the engine part is PR #559).
 
+The conversation burst (`conversation_burst`, opt-in) is for the serial default only. With `"parallel": N` above 1 the engine's slots already keep each conversation, so the server says the burst has no effect. See [DETAILS.md](DETAILS.md).
+
 **Qwen3.6-35B-A3B** has the same option on its own engine path (`"parallel": N`, `--batch N`, `--batch-mtp`, up to 8 slots, the same
 engine protocol and the same server): its numbers, what a slot costs and where setup recommends it are in [QWEN36.md](QWEN36.md).
 

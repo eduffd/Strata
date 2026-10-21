@@ -1231,6 +1231,24 @@ Unknown telemetry or insufficient RAM skips parking, and the same figure and flo
 decide whether a session file may be saved or restored (below). An 8 GiB budget
 is a cap, not a recommendation for every machine.
 
+**One conversation's turns in a row (opt-in, `conversation_burst`).** When Strata answers one request at a time
+and several conversations take turns, it normally switches conversations every turn, so each prompt is read
+again from the engine's checkpoint. `conversation_burst` lets one conversation have up to N turns in a row
+before another waiting conversation gets the turn; `conversation_grace_ms` (default 100) is a short wait after
+a reply for that conversation's next turn, and when it does not come the next conversation goes. Set them with
+`"conversation_burst": 4, "conversation_grace_ms": 150` in `strata-<model>.json`, or with
+`--conversation-burst 4 --conversation-grace-ms 150` on `strata serve` or `strata launch`. Off by default (0 or
+absent); with it off the server's order, timing, keep-alive cadence, cancellation and queue deadline are
+unchanged. It needs one request at a time: with `--parallel` above 1 the server says so once, because the
+engine's slots already keep each conversation. A conversation is recognized by its prompt alone: the request
+must agree with the last served prompt up to its last `<|im_start|>` (the engine's turn checkpoint) and
+continue past it, with the same pictures below that point. There is no session id, header or cookie. The burst
+changes only the order of turns; the conversation cache still decides what is read, and fewer switches mean
+fewer re-reads and fewer parked-conversation changes. Not measured yet: the plan is four fixed conversations
+of about 4k tokens, six turns each, one turn per client, with and without `conversation_burst=10` and a 100 ms
+grace, reading `prompt_read`, `reused` and `prompt_ms` from the engine's DONE line and the server's history;
+the figures go here with the card, CPU, RAM, OS, model, quantization, context and build.
+
 **The RAM figure (`available_host_bytes()`).** The headroom is the smallest of three
 numbers, sampled each time it is asked and not a reservation (other writers can take the
 room afterwards):

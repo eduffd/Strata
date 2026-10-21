@@ -65,9 +65,12 @@ strata launch --preset Office --set prefill=65536 --set STRATA_PIN_BY_NEED=1 --n
 strata launch --model q2_0 --pool-cores 2-14:2 --no-tui               # experimental: pin the CPU workers to these logical processors (see DETAILS.md)
 strata launch --plan --model q2_0                                      # what would happen; nothing changes
 strata launch --model q2_0 --yes --no-tui                              # no questions (for one: download on a computer with no engine yet)
+strata launch --model q2_0 --conversation-burst 4 --no-tui             # one conversation's turns in a row (needs one request at a time)
 strata launch --model q2_0 --open                                      # also open the server's page in your browser once it serves
 strata launch --list-presets | --delete-preset NAME | --status | --stop [--preset NAME] | --show-key
 ```
+
+`--conversation-burst N` and `--conversation-grace-ms MS` (opt-in) serve up to N turns of one conversation in a row before another conversation's waiting request, and wait MS milliseconds (default 100) after a reply for that conversation's next turn. They need one request at a time: with `--parallel` above 1 the server says the setting has no effect, because the engine's slots already keep each conversation. The screens do not offer it; add the flags (a saved preset keeps them). With the flags absent the server is unchanged. See [DETAILS.md](DETAILS.md).
 
 `strata launch --help` lists everything with examples. An unknown model or flag gets a plain message with the closest match. Presets are small files in `launch-presets/` beside the profiles
 folder; the run uses the shared profile `launch-<name>` and the shared tuning presets (`strata presets`), so the app sees them too. Flags next to `--preset` change that start only
